@@ -1,0 +1,137 @@
+name: Build and publish Debian packages
+
+# Same dispatch contract as publish_release.yml, so one release event drives every artifact lane:
+#   repository_dispatch, type `gufo-release`, with client_payload.tag = v<M.m.p>
+# The tag is the only thing a release contributes. Nothing in deb/ is edited at release time;
+# if this workflow ever needs a commit to build a new version, the lane has stopped being a tool.
+on:
+  repository_dispatch:
+    types:
+      - gufo-release
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Gufo release tag, for example v<M.m.p>. Empty builds the newest tag.
+        required: false
+        type: string
+      ref:
+        description: Untagged ref to build (stamps +git<sha>, needs snapshot semantics)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-deb-${{ github.event.client_payload.tag || inputs.tag || inputs.ref || 'latest' }}
+  cancel-in-progress: false
+
+env:
+  # The builder image is the only place the ROCm build line is named, and it is an argument
+  # there, not a constant here. See deb/builder/Dockerfile.
+  BUILDER_IMAGE: ghcr.io/${{ github.repository_owner }}/gufo-deb-builder
+  IMAGE_TAG: "${{ github.event.client_payload.tag || inputs.tag || 'latest' }}"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    outputs:
+      version: ${{ steps.ver.out }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: toolboxes
+
+      - name: Scope gate (source) -- what this lane promises not to ship
+        # Cheap and always run: no compiler, no network to AMD, no artifact. It also injects each
+        # forbidden shape into a copy and requires itself to fail, so a passing run means the gate
+        # is live and not merely present.
+        run: ./deb/tests/lite-scope.sh
+
+      - name: Resolve the ref to build
+        id: ver
+        run: |
+          ref="${IMAGE_TAG}"
+          if [ -z "${ref}" ]; then
+            ref="$(git ls-remote --tags --sort=-v:refname https://github.com/gufo-org/gufo \
+                   | sed -n 's|.*refs/tags/\(v[0-9][0-9.]*\)$|\1|p' | head -1)"
+          fi
+          [ -n "${ref}" ] || { echo "no ref resolved" >&2; exit 1; }
+          echo "ref=${ref}" | tee "$GITHUB_OUTPUT"
+          echo "## Building ${ref}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build the builder image
+        run: |
+          # Local builds use podman; the GitHub runner ships docker. Same Dockerfile, same args.
+          docker build -t "${BUILDER_IMAGE}:${IMAGE_TAG}" \
+            --build-arg ROCM_SERIES="${ROCM_SERIES:-7.2.4}" \
+            toolboxes/deb/builder
+          docker save "${BUILDER_IMAGE}:${IMAGE_TAG}" -o /tmp/builder.tar
+          rm -rf "${BUILDER_IMAGE}:${IMAGE_TAG}" || true
+          docker load -i /tmp/builder.tar
+
+      - name: Build the package inside the builder image
+        # --memory is the point, not an optimisation: it keeps the kernel's out-of-memory decision
+        # inside this container's cgroup, so a compile cannot take down something else that happens
+        # to share the host. deb/build-deb computes -j from the machine it runs on as well.
+        run: |
+          docker run --rm --memory 12g --memory-swap 0 \
+            -v "$PWD:/build" -w /build \
+            -e DEBIAN_REVISION="${DEBIAN_REVISION:-1}" \
+            "${BUILDER_IMAGE}:${IMAGE_TAG}" \
+            ./toolboxes/deb/build-deb "${{ steps.ver.outputs.ref }}" \
+              --in-container --out /build/out
+        env:
+          DEBIAN_REVISION: ${{ inputs.revision || '1' }}
+
+      - name: Scope gate against the built artifact
+        run: |
+          for f in out/gufo_*_amd64.deb; do
+            echo "::group::lite-scope ${f}"
+            ./toolboxes/deb/tests/lite-scope.sh "${f}"
+            echo "::endgroup::"
+          done
+
+      - name: Install and smoke-test in a clean container
+        # The artifact is installed on a machine that has the runtime and nothing else of ours.
+        # This is where the "no unit, no /etc/gufo, script-free, still loads" claims are checked.
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" -w /work \
+            "${BUILDER_IMAGE}:${IMAGE_TAG}" \
+            sh -c '
+              set -e
+              deb="$(ls out/gufo_*_amd64.deb | head -1)"
+              dpkg -i "$deb"
+              # The linker must be able to reach the ROCm runtime through the packaged conf alone.
+              ldconfig -p | grep -q "/opt/rocm" || { echo "FAIL: /opt/rocm never reached the loader"; exit 1; }
+              # Nothing of ours may have touched systemd, and no configuration may be assumed.
+              test -z "$(ls /usr/lib/systemd/system 2>/dev/null | grep -i gufo || true)" || { echo "FAIL: a unit was installed"; exit 1; }
+              test ! -e /etc/gufo || { echo "FAIL: /etc/gufo exists; this package is not supposed to own a config"; exit 1; }
+              test ! -e /usr/lib/gufo || { echo "FAIL: /usr/lib/gufo exists; the launcher belongs to another change"; exit 1; }
+              echo "ok: installed, linker path live, no unit, no config, no launcher"
+            '
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ steps.ver.outputs.ref }}
+          path: |
+            out/*.deb
+            out/*.buildinfo
+            out/*.changes
+          if-no-files-found: error
+
+      - name: Attach the packages to the Gufo release
+        # Gated on the credential rather than on a guess. Everything above runs and publishes to
+        # this workflow run regardless, so the lane is useful before this step can succeed; when
+        # the cross-repository token exists this lights up with no other change, which is the
+        # arrangement asked for in review ("upload the packages as assets on the corresponding Gufo
+        # release ... we can arrange those on our side").
+        if: env.GUFO_RELEASE_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ secrets.GUFO_RELEASE_TOKEN }}
+        run: |
+          gh release upload "${{ steps.ver.outputs.ref }}" out/gufo_*.deb \
+            --repo gufo-org/gufo --clobber
+          echo "attached $(ls out/gufo_*.deb | wc -l) package(s) to gufo-org/gufo ${{ steps.ver.outputs.ref }}" >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,3 @@
+# Scratch the lane creates in the repository root when it builds in place.
+/out/
+/.deb-lite-build/

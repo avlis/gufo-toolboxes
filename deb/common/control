@@ -1,0 +1,73 @@
+Source: gufo
+Section: utils
+Priority: optional
+Maintainer: Gufo Maintainers <maintainers@gufo.dev>
+# libsndfile1-dev and libsoxr-dev are required since engine v0.26.0 (native audio embeddings,
+# upstream #819/#828): CMakeLists.txt runs pkg_check_modules(SNDFILE REQUIRED) and
+# pkg_check_modules(SOXR REQUIRED) unconditionally, so configure aborts without them -- "The
+# following required packages were not found: - sndfile". Neither appears in v0.25.0. They belong in
+# this field whatever the scope: the lite package is lite about what it INSTALLS, not about what the
+# engine needs to COMPILE.
+Build-Depends: debhelper-compat (= 13), cmake (>= 3.21), ninja-build,
+ pkg-config, python3, libicu-dev, libcurl4-openssl-dev, libssl-dev,
+ libpng-dev, libjpeg-dev, libwebp-dev, libsndfile1-dev, libsoxr-dev,
+ hip-dev (>= 6.2), rocm-llvm,
+ hipblas-dev, hipblaslt-dev, rocblas-dev, hipcub-dev, rocprim-dev, rocwmma-dev
+Standards-Version: 4.7.0
+Homepage: https://github.com/gufo-org/gufo
+Rules-Requires-Root: no
+# Without these two fields the autopkgtest in debian/tests/ is invisible: autopkgtest and CI
+# discover tests through the source stanza's Testsuite field, so a correct debian/tests/control
+# alone runs nothing outside a human terminal. The smoke test existing and the smoke test
+# running are different facts.
+Testsuite: autopkgtest
+Testsuite-Triggers: dpkg-dev
+
+# The runtime dependencies below are spelled out on purpose and are not generated.
+# ${shlibs:Depends} builds its list from the shlibs files that Debian packages ship under
+# /var/lib/dpkg/info/*.shlibs. The AMD ROCm runtime packages ship none for these sonames, so
+# the generated substitution knows nothing about them and the package would install on a host
+# that cannot run it. Verified on a machine with the runtime installed:
+#   grep -l 'hipblas\|rocblas\|amdhip64' /var/lib/dpkg/info/*.shlibs
+#     -> /var/lib/dpkg/info/libamdhip64-5:amd64.shlibs        (exactly one hit)
+# Each floor below is the soname the binary actually asks for, taken from the same host:
+#   ldd /usr/bin/gufo | grep -E 'hipblas|rocblas|amdhip64'
+#     libhipblas.so.3     -> hipblas         (>= 3.2.0)
+#     libhipblaslt.so.1   -> hipblaslt       (>= 1.2.2)
+#     librocblas.so.5     -> rocblas         (>= 5.2.0)
+#     libamdhip64.so.7    -> hip-runtime-amd (>= 7.2.3)
+# They are floors, not pins: a newer patch of the same line, or the next major, installs
+# without touching this file. 7.2.3 is the ROCm version the project README qualifies.
+#
+# ffmpeg is here because the binary executes it; nothing links it:
+#   ldd /usr/bin/gufo | grep -c avcodec   -> 0
+#   strings /usr/bin/gufo | grep -E '^(ffmpeg|ffprobe)$'   -> both present
+# adduser is deliberately NOT here. This package creates no user and installs no unit; the
+# account exists to run a service, and the service is a separate review.
+
+Package: gufo
+Architecture: amd64
+Depends: ${shlibs:Depends}, ${misc:Depends},
+ hip-runtime-amd (>= 7.2.3),
+ rocblas (>= 5.2.0),
+ hipblas (>= 3.2.0),
+ hipblaslt (>= 1.2.2),
+ ffmpeg
+Description: Strix Halo inference engine
+ Gufo is a vertical local inference engine built specifically for AMD Strix Halo hardware
+ (Ryzen AI MAX+ 395, gfx1151), serving text, audio, image and video models through an
+ OpenAI-compatible API.
+ .
+ This package is the engine: the binary, the runtime data the binary is compiled to look for,
+ and the third-party licenses. It installs no systemd unit, no launcher, no configuration file
+ and opens no port. How the engine is started, which model it loads and where its caches live
+ are deployment choices, and they are proposed as a separate change so they can be reviewed as
+ such.
+ .
+ The ROCm runtime libraries are NOT in Debian. Add AMD's ROCm apt repository before installing
+ this package, or apt will refuse on the unresolvable dependency rather than install something
+ that cannot run. See deb/README.md.
+ .
+ This package is not equivalent to the qualified Nix build. The Nix package applies
+ rocr-fixed-cwsr.patch to ROCr; the ROCm runtime installed from AMD's apt repository does not
+ carry that patch.

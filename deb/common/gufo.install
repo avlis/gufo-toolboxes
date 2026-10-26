@@ -1,0 +1,17 @@
+# What the build installs lands in debian/gufo/ already, because debian/rules hands
+# dh_auto_install a --destdir of debian/gufo: the binary, the /usr/share/gufo runtime data and
+# the licenses. dh_install adds nothing to that.
+#
+# The one file the build does NOT produce is the linker configuration, and without it the
+# engine does not start:
+#
+#   readelf -d /usr/bin/gufo | grep -E 'RPATH|RUNPATH'      -> nothing
+#   /lib64/ld-linux-x86-64.so.2 --inhibit-cache \
+#       --library-path /usr/lib/x86_64-linux-gnu /usr/bin/gufo --version
+#     -> error while loading shared libraries: libhipblas.so.3
+#   the same probe with :/opt/rocm/lib appended
+#     -> gufo version <the release being built>
+#
+# The AMD ROCm runtime packages register no ld.so.conf.d entry of their own, so this package
+# ships the one /opt/rocm/lib line. It is a runtime file, not a deployment preference.
+debian/rocm.conf etc/ld.so.conf.d/
