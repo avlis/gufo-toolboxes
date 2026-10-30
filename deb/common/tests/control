@@ -1,3 +1,0 @@
-Test-Command: ./debian/tests/smoke.sh
-Depends: dpkg-dev, binutils, coreutils, grep
-Restrictions: allow-stderr
