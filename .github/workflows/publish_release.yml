@@ -11,7 +11,17 @@ on:
         required: true
         type: string
       windows-only:
-        description: Rebuild and upload only the Windows ZIP (skip OCI images)
+        description: Rebuild and upload only the Windows ZIP
+        required: false
+        type: boolean
+        default: false
+      deb-only:
+        description: Build and upload only the Debian package
+        required: false
+        type: boolean
+        default: false
+      replace-deb-assets:
+        description: Replace the Debian package and checksum already attached to this tag
         required: false
         type: boolean
         default: false
@@ -44,11 +54,18 @@ jobs:
         id: release
         env:
           RELEASE_TAG: ${{ github.event.client_payload.tag || inputs.tag }}
+          WINDOWS_ONLY: ${{ inputs.windows-only || false }}
+          DEB_ONLY: ${{ inputs.deb-only || false }}
         shell: bash
         run: |
           set -euo pipefail
           if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
             echo "Expected a Gufo release tag like v0.2.0, got: $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+          if [[ "$WINDOWS_ONLY" == true && "$DEB_ONLY" == true ]]; then
+            echo "Choose either windows-only or deb-only, not both" >&2
             exit 1
           fi
 
@@ -60,6 +77,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   build-windows:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.deb-only) }}
     needs: prepare
     permissions:
       actions: read
@@ -168,16 +186,21 @@ jobs:
       - name: Attach Debian assets to the Gufo release
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPLACE_DEB_ASSETS: ${{ github.event_name == 'workflow_dispatch' && inputs.replace-deb-assets }}
         working-directory: release
         run: |
           sha256sum --check "gufo_${RELEASE_VERSION}-1_amd64.deb.sha256"
           gh release view "$RELEASE_TAG" --repo gufo-org/gufo
-          gh release upload "$RELEASE_TAG" --repo gufo-org/gufo \
+          upload_args=()
+          if [[ "$REPLACE_DEB_ASSETS" == true ]]; then
+            upload_args+=(--clobber)
+          fi
+          gh release upload "$RELEASE_TAG" --repo gufo-org/gufo "${upload_args[@]}" \
             "gufo_${RELEASE_VERSION}-1_amd64.deb" \
             "gufo_${RELEASE_VERSION}-1_amd64.deb.sha256"
 
   build-and-push:
-    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.windows-only) }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.windows-only || inputs.deb-only)) }}
     needs: prepare
     runs-on: ubuntu-latest
     strategy:

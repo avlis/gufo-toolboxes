@@ -4,6 +4,9 @@ The stable release workflow builds `gufo_<version>-1_amd64.deb` and its SHA-256
 checksum from the exact Gufo release tag, tests installation and removal in a
 fresh Debian container, and attaches both files to that release in
 `gufo-org/gufo`. Publishing uses the same GitHub App as the Windows release.
+For a manual Debian-only release, run `Publish Stable Gufo Releases` with
+`tag=vX.Y.Z` and `deb-only=true`. To replace existing Debian assets explicitly,
+also set `replace-deb-assets=true`. Windows and OCI jobs are skipped in this mode.
 Existing release assets are never overwritten automatically.
 
 The package targets Debian 13 (trixie), amd64, and AMD Strix Halo (gfx1151).
